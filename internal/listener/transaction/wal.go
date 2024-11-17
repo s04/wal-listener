@@ -3,6 +3,7 @@ package transaction
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ihippik/wal-listener/v2/internal/config"
 	"github.com/ihippik/wal-listener/v2/internal/publisher"
 )
 
@@ -115,7 +117,7 @@ func (w *WAL) CreateActionData(
 
 // CreateEventsWithFilter filter WAL message by table,
 // action and create events for each value.
-func (w *WAL) CreateEventsWithFilter(ctx context.Context, tableMap map[string][]string) <-chan *publisher.Event {
+func (w *WAL) CreateEventsWithFilter(ctx context.Context, filter config.FilterStruct) <-chan *publisher.Event {
 	output := make(chan *publisher.Event)
 
 	go func(ctx context.Context) {
@@ -147,22 +149,61 @@ func (w *WAL) CreateEventsWithFilter(ctx context.Context, tableMap map[string][]
 			event.DataOld = dataOld
 			event.EventTime = *w.CommitTime
 
-			actions, validTable := tableMap[item.Table]
-
+			// Check table and action filters
+			actions, validTable := filter.Tables[item.Table]
 			validAction := inArray(actions, item.Kind.string())
-			if validTable && validAction {
-				output <- event
+			if !validTable || !validAction {
+				w.monitor.IncFilterSkippedEvents(item.Table)
+				w.log.Debug(
+					"wal-message was skipped by table/action filter",
+					slog.String("schema", item.Schema),
+					slog.String("table", item.Table),
+					slog.String("action", string(item.Kind)),
+				)
 				continue
 			}
 
-			w.monitor.IncFilterSkippedEvents(item.Table)
+			// Check column filters if configured for this table
+			if columnFilters, hasColumnFilters := filter.ColumnFilter[item.Table]; hasColumnFilters {
+				// Assume event passes filter until we find a mismatch
+				passesColumnFilters := true
 
-			w.log.Debug(
-				"wal-message was skipped by filter",
-				slog.String("schema", item.Schema),
-				slog.String("table", item.Table),
-				slog.String("action", string(item.Kind)),
-			)
+				// For each column that has filters
+				for columnName, allowedValues := range columnFilters {
+					// Get the actual value for this column from the event data
+					actualValue, exists := data[columnName]
+					if !exists {
+						w.log.Debug(
+							"column filter skipped: column not found in event",
+							slog.String("table", item.Table),
+							slog.String("column", columnName),
+						)
+						continue
+					}
+
+					// Convert actual value to string for comparison
+					actualStr := fmt.Sprintf("%v", actualValue)
+
+					// Check if the value is in the allowed list
+					if !inArray(allowedValues, actualStr) {
+						passesColumnFilters = false
+						w.monitor.IncFilterSkippedEvents(item.Table)
+						w.log.Debug(
+							"wal-message was skipped by column filter",
+							slog.String("table", item.Table),
+							slog.String("column", columnName),
+							slog.String("value", actualStr),
+						)
+						break
+					}
+				}
+
+				if !passesColumnFilters {
+					continue
+				}
+			}
+
+			output <- event
 		}
 
 		close(output)

@@ -8,6 +8,11 @@ listener:
       seasons:
         - insert
         - update
+    columnFilters:
+      seasons:
+        name:
+          - "Winter"
+          - "Autumn"
   topicsMap:
     schema_table_name: "notifier"
 logger:

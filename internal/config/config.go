@@ -64,7 +64,8 @@ type DatabaseCfg struct {
 
 // FilterStruct incoming WAL message filter.
 type FilterStruct struct {
-	Tables map[string][]string
+	Tables       map[string][]string            `yaml:"tables"`
+	ColumnFilter map[string]map[string][]string `yaml:"columnFilters"` // table -> column -> allowed values
 }
 
 // Validate config data.
